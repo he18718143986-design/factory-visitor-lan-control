@@ -1,0 +1,1336 @@
+openapi: 3.0.3
+info:
+  title: 厂区访客管控 SaaS API
+  description: |
+    Factory Visitor Control SaaS — 多租户访客手机管控系统 API。
+    
+    ## 认证方式
+    - Cookie 认证：登录后通过 `token` HttpOnly cookie 进行身份验证
+    - CSRF 保护：非安全方法（POST/PUT/DELETE）需携带 `X-CSRF-Token` 头，值与 `csrf_token` cookie 一致
+    
+    ## 错误格式
+    所有 API 错误返回统一格式：
+    ```json
+    {
+      "error": "ERROR_CODE",
+      "message": "用户可见描述",
+      "timestamp": "2024-01-01T00:00:00.000Z",
+      "requestId": "uuid"
+    }
+    ```
+  version: 2.0.0
+  contact:
+    name: Factory SaaS Support
+
+servers:
+  - url: http://localhost:3000
+    description: 开发环境
+
+tags:
+  - name: auth
+    description: 认证与用户注册
+  - name: checkin
+    description: 访客签到与二维码
+  - name: sessions
+    description: 访客会话管理
+  - name: sites
+    description: 厂区管理
+  - name: subscriptions
+    description: 订阅管理（用户侧）
+  - name: orders
+    description: 订单与支付
+  - name: admin
+    description: 超管后台操作
+  - name: network
+    description: 网络绑定与重绑
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: token
+  
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          example: BAD_REQUEST
+        message:
+          type: string
+          example: 请求参数无效
+        timestamp:
+          type: string
+          format: date-time
+        requestId:
+          type: string
+          format: uuid
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        isSuperAdmin:
+          type: boolean
+
+    Session:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        subscriptionId:
+          type: string
+        visitorName:
+          type: string
+        visitorCompany:
+          type: string
+        area:
+          type: string
+        status:
+          type: string
+          enum: [waiting, pairing, paired_not_connected, restricted, exiting, exited, error]
+        deviceId:
+          type: string
+          nullable: true
+        deviceIp:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        restrictedAt:
+          type: string
+          format: date-time
+          nullable: true
+        exitedAt:
+          type: string
+          format: date-time
+          nullable: true
+        logs:
+          type: array
+          items:
+            type: string
+        entryQR:
+          type: string
+          description: Base64 data URL
+        exitQR:
+          type: string
+          description: Base64 data URL
+        selfCheckin:
+          type: boolean
+        tamperDetected:
+          type: boolean
+
+    Subscription:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        site_id:
+          type: string
+        area_name:
+          type: string
+        plan:
+          type: string
+          enum: [trial, monthly, yearly]
+        status:
+          type: string
+          enum: [trial, active, grace, expired, suspended, cancelled]
+        trial_ends_at:
+          type: integer
+          description: Unix timestamp (ms)
+        paid_ends_at:
+          type: integer
+          nullable: true
+        isActive:
+          type: boolean
+        remainingDays:
+          type: number
+
+    Site:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        name:
+          type: string
+        address:
+          type: string
+        created_at:
+          type: integer
+
+    Order:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        subscription_id:
+          type: string
+        site_id:
+          type: string
+        plan_code:
+          type: string
+          enum: [monthly, yearly]
+        duration_days:
+          type: integer
+        amount_fen:
+          type: integer
+        status:
+          type: string
+          enum: [pending_payment, paid_pending_review, confirmed, rejected, cancelled, expired]
+        txn_id:
+          type: string
+        created_at:
+          type: integer
+
+  parameters:
+    csrfHeader:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      schema:
+        type: string
+
+paths:
+  # ── Auth ────────────────────────────────────────────────────
+  /api/auth/login:
+    post:
+      tags: [auth]
+      summary: 用户登录
+      description: 验证邮箱密码，成功后设置 token cookie
+      parameters:
+        - $ref: '#/components/parameters/csrfHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  user:
+                    $ref: '#/components/schemas/User'
+                  redirect:
+                    type: string
+        '401':
+          description: 凭据无效
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: 登录过于频繁
+
+  /api/auth/register:
+    post:
+      tags: [auth]
+      summary: 用户注册
+      parameters:
+        - $ref: '#/components/parameters/csrfHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, name]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 8
+                name:
+                  type: string
+                areaName:
+                  type: string
+                  description: 首个厂区名称（可选）
+      responses:
+        '200':
+          description: 注册成功，自动创建厂区和试用订阅
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  redirect:
+                    type: string
+        '409':
+          description: 邮箱已被注册
+
+  /api/auth/logout:
+    post:
+      tags: [auth]
+      summary: 登出
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: 登出成功
+
+  /api/auth/me:
+    get:
+      tags: [auth]
+      summary: 获取当前用户信息
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: 当前用户
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          description: 未登录
+
+  # ── Checkin ─────────────────────────────────────────────────
+  /api/checkin-qr:
+    get:
+      tags: [checkin]
+      summary: 生成签到二维码
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: area
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 二维码数据
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  qr:
+                    type: string
+                    description: 二维码 DataURL
+                  url:
+                    type: string
+                  siteId:
+                    type: string
+                  subscriptionId:
+                    type: string
+                  checkinToken:
+                    type: string
+
+  /api/network-check:
+    get:
+      tags: [checkin]
+      summary: 检查访客是否在同一网络
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sameNetwork:
+                    type: boolean
+                  clientIp:
+                    type: string
+                  serverIp:
+                    type: string
+
+  /api/checkin:
+    post:
+      tags: [checkin]
+      summary: 访客签到
+      parameters:
+        - $ref: '#/components/parameters/csrfHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, area]
+              properties:
+                name:
+                  type: string
+                company:
+                  type: string
+                area:
+                  type: string
+                siteId:
+                  type: string
+                checkinToken:
+                  type: string
+      responses:
+        '200':
+          description: 签到成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessionId:
+                    type: string
+                  entryQR:
+                    type: string
+                  exitQR:
+                    type: string
+        '429':
+          description: 签到过于频繁
+
+  # ── Sessions ────────────────────────────────────────────────
+  /api/sessions:
+    get:
+      tags: [sessions]
+      summary: 获取当前活跃会话列表
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: siteId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Session'
+
+  /api/sessions/{id}/exit:
+    post:
+      tags: [sessions]
+      summary: 访客正常离厂
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/csrfHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                exitToken:
+                  type: string
+      responses:
+        '200':
+          description: 离厂成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  tamperDetected:
+                    type: boolean
+                  verifyReport:
+                    type: object
+
+  /api/sessions/{id}/force-exit:
+    post:
+      tags: [sessions]
+      summary: 强制离厂（操作员）
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/csrfHeader'
+      responses:
+        '200':
+          description: 强制离厂成功
+
+  /api/sessions/{id}/retry:
+    post:
+      tags: [sessions]
+      summary: 重试管控
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/csrfHeader'
+      responses:
+        '200':
+          description: 重试成功
+
+  /api/sessions/{id}/device:
+    post:
+      tags: [sessions]
+      summary: 上报设备 IP
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/csrfHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceIp]
+              properties:
+                deviceIp:
+                  type: string
+                  format: ipv4
+      responses:
+        '200':
+          description: 设备 IP 已记录
+
+  # ── History ─────────────────────────────────────────────────
+  /api/history/sessions:
+    get:
+      tags: [sessions]
+      summary: 查询会话历史
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: siteId
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+            default: exited
+        - name: q
+          in: query
+          schema:
+            type: string
+          description: 关键词搜索
+        - name: from
+          in: query
+          schema:
+            type: integer
+          description: 起始时间戳
+        - name: to
+          in: query
+          schema:
+            type: integer
+          description: 结束时间戳
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            maximum: 500
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Session'
+                  total:
+                    type: integer
+                  hasMore:
+                    type: boolean
+
+  /api/history/sessions/export:
+    get:
+      tags: [sessions]
+      summary: 导出会话历史 CSV
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: siteId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: CSV 文件
+          content:
+            text/csv:
+              schema:
+                type: string
+
+  # ── Sites ───────────────────────────────────────────────────
+  /api/sites:
+    get:
+      tags: [sites]
+      summary: 获取用户厂区列表
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sites:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Site'
+    post:
+      tags: [sites]
+      summary: 创建新厂区
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/csrfHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                address:
+                  type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  siteId:
+                    type: string
+                  subscriptionId:
+                    type: string
+
+  # ── User Subscriptions ────────────────────────────────────────
+  /api/user/subscriptions:
+    get:
+      tags: [subscriptions]
+      summary: 获取用户订阅列表
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  subscriptions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Subscription'
+
+  /api/user/subscriptions/{subId}/bind-ip:
+    post:
+      tags: [subscriptions, network]
+      summary: 绑定当前 IP 子网
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: subId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/csrfHeader'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  wifiSubnet:
+                    type: string
+
+  # ── Network Rebind ─────────────────────────────────────────
+  /api/sites/{siteId}/network-rebind-requests:
+    get:
+      tags: [network]
+      summary: 查询重绑请求列表
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: siteId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requests:
+                    type: array
+                    items:
+                      type: object
+    post:
+      tags: [network]
+      summary: 提交网络重绑申请
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: siteId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/csrfHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                candidateSubnet:
+                  type: string
+                reason:
+                  type: string
+                evidence:
+                  type: string
+                candidateFingerprint:
+                  type: object
+                  properties:
+                    publicIp:
+                      type: string
+                    gatewayIp:
+                      type: string
+                    lanSubnet:
+                      type: string
+                    ssid:
+                      type: string
+                    bssid:
+                      type: string
+                    gatewayMac:
+                      type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  requestId:
+                    type: string
+                  riskScore:
+                    type: integer
+
+  # ── Orders & Payment ────────────────────────────────────────
+  /api/plans:
+    get:
+      tags: [orders]
+      summary: 获取可用套餐列表
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  plans:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        code:
+                          type: string
+                        name:
+                          type: string
+                        durationDays:
+                          type: integer
+                        amountFen:
+                          type: integer
+                        amountYuan:
+                          type: string
+
+  /api/orders:
+    get:
+      tags: [orders]
+      summary: 获取用户订单列表
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  orders:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Order'
+    post:
+      tags: [orders]
+      summary: 创建订单
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/csrfHeader'
+        - name: Idempotency-Key
+          in: header
+          schema:
+            type: string
+          description: 幂等键，防止重复提交
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [siteId, planCode]
+              properties:
+                siteId:
+                  type: string
+                planCode:
+                  type: string
+                  enum: [monthly, yearly]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  order:
+                    $ref: '#/components/schemas/Order'
+
+  /api/orders/{id}/pay:
+    post:
+      tags: [orders]
+      summary: 提交支付凭据
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/csrfHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [txnId]
+              properties:
+                txnId:
+                  type: string
+                  description: 交易流水号
+                note:
+                  type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  order:
+                    $ref: '#/components/schemas/Order'
+
+  /api/user/payment-info:
+    get:
+      tags: [orders]
+      summary: 获取收款信息
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  alipay:
+                    type: string
+                  wechat:
+                    type: string
+                  bankName:
+                    type: string
+                  bankAccount:
+                    type: string
+                  bankHolder:
+                    type: string
+                  prices:
+                    type: object
+
+  # ── Admin ───────────────────────────────────────────────────
+  /api/admin/stats:
+    get:
+      tags: [admin]
+      summary: 系统统计数据
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  totalUsers:
+                    type: integer
+                  activeSubsCnt:
+                    type: integer
+                  pendingPayCnt:
+                    type: integer
+                  totalRevenueFen:
+                    type: integer
+                  monthlyRevenueFen:
+                    type: integer
+
+  /api/admin/users:
+    get:
+      tags: [admin]
+      summary: 获取所有用户
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items:
+                      type: object
+
+  /api/admin/users/{id}/status:
+    post:
+      tags: [admin]
+      summary: 修改用户状态
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/csrfHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [active, suspended]
+      responses:
+        '200':
+          description: 状态更新成功
+
+  /api/admin/subscriptions:
+    get:
+      tags: [admin]
+      summary: 获取所有订阅
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  subscriptions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Subscription'
+
+  /api/admin/subscriptions/{id}/activate:
+    post:
+      tags: [admin]
+      summary: 激活订阅
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/csrfHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan, months]
+              properties:
+                plan:
+                  type: string
+                  enum: [monthly, yearly]
+                months:
+                  type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  paidStartsAt:
+                    type: integer
+                  paidEndsAt:
+                    type: integer
+
+  /api/admin/subscriptions/{id}/suspend:
+    post:
+      tags: [admin]
+      summary: 暂停订阅
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/csrfHeader'
+      responses:
+        '200':
+          description: 暂停成功
+
+  /api/admin/subscriptions/{id}/resume:
+    post:
+      tags: [admin]
+      summary: 恢复订阅
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/csrfHeader'
+      responses:
+        '200':
+          description: 恢复成功
+
+  /api/admin/subscriptions/{id}/cancel:
+    post:
+      tags: [admin]
+      summary: 取消订阅
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/csrfHeader'
+      responses:
+        '200':
+          description: 取消成功
+
+  /api/admin/subscriptions/{id}/unbind-ip:
+    post:
+      tags: [admin]
+      summary: 解绑订阅 IP
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/csrfHeader'
+      responses:
+        '200':
+          description: 解绑成功
+
+  /api/admin/orders:
+    get:
+      tags: [admin]
+      summary: 获取所有订单
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  orders:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Order'
+
+  /api/admin/orders/{id}/confirm:
+    post:
+      tags: [admin]
+      summary: 确认订单支付
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/csrfHeader'
+      responses:
+        '200':
+          description: 确认成功
+
+  /api/admin/orders/{id}/reject:
+    post:
+      tags: [admin]
+      summary: 驳回订单
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/csrfHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: 驳回成功
+
+  /api/admin/network-rebind-requests:
+    get:
+      tags: [admin, network]
+      summary: 获取所有重绑请求
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requests:
+                    type: array
+                    items:
+                      type: object
+
+  /api/admin/network-rebind-requests/{id}/approve:
+    post:
+      tags: [admin, network]
+      summary: 批准重绑请求
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/csrfHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                note:
+                  type: string
+                forceApprove:
+                  type: boolean
+                  description: 高风险请求需要设置为 true
+      responses:
+        '200':
+          description: 批准成功
+
+  /api/admin/network-rebind-requests/{id}/reject:
+    post:
+      tags: [admin, network]
+      summary: 驳回重绑请求
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/csrfHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: 驳回成功
+
+  /api/admin/audit-logs:
+    get:
+      tags: [admin]
+      summary: 查询审计日志
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            maximum: 200
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: siteId
+          in: query
+          schema:
+            type: string
+        - name: q
+          in: query
+          schema:
+            type: string
+          description: 全文搜索
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                  total:
+                    type: integer
+                  hasMore:
+                    type: boolean
+
+  /api/user/profile:
+    get:
+      tags: [auth]
+      summary: 获取用户详细资料
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  email:
+                    type: string
+                  name:
+                    type: string
+                  phone:
+                    type: string
+                  createdAt:
+                    type: integer

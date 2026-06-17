@@ -1,0 +1,25 @@
+# Dependencies & build
+node_modules/
+visitorapp/build/
+visitorapp/.gradle/
+visitorapp/.idea/
+visitorapp/local.properties
+
+# Secrets & runtime data
+.env
+factory-saas/.env
+factory-saas/data/
+factory-saas/logs/
+factory-saas/coverage/
+
+# OS & IDE
+.DS_Store
+*.log
+*.swp
+.idea/
+.vscode/
+
+# Android
+*.apk
+*.aab
+*.keystore
